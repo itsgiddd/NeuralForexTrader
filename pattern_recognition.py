@@ -15,6 +15,7 @@ class Pattern:
     push_count: int = 1
     volume_score: float = 0.5
     quality_grade: str = "B"
+    timeframe: Optional[str] = None
 
 class PatternRecognizer:
     def __init__(self, data: pd.DataFrame):

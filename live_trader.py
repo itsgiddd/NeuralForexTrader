@@ -9,7 +9,7 @@ from ai_brain import AIBrain
 # --- CONFIGURATION ---
 SYMBOLS = [
     "EURUSD", "GBPUSD", "USDJPY", "USDCHF", "USDCAD", "AUDUSD", "NZDUSD",
-    "EURGBP", "EURJPY", "GBPJPY", "AUDJPY", "CADJPY", "CHFJPY"
+    "EURGBP", "EURJPY", "GBPJPY", "CADJPY", "CHFJPY"
 ]
 MAGIC_NUMBER = 123456
 

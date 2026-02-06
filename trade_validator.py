@@ -1,3 +1,4 @@
+<<<<<<< Updated upstream
 from dataclasses import dataclass, field
 from typing import List
 
@@ -91,3 +92,16 @@ class TradeValidator:
         else:
             reasons.append("Rejected: confluence below threshold")
             return TradeDecision(False, f"Low Confluence (Score {score}/8)", score, ai_conf, reasons)
+=======
+class TradeDecision:
+    def __init__(self, should_trade, confidence, rejection_reason, confluence_score):
+        self.should_trade = should_trade
+        self.confidence = confidence
+        self.rejection_reason = rejection_reason
+        self.confluence_score = confluence_score
+
+class TradeValidator:
+    def validate(self, pattern, market_state, features):
+        score = 0.8
+        return TradeDecision(True, 0.8, None, 100)
+>>>>>>> Stashed changes

@@ -1,3 +1,4 @@
+
 import numpy as np
 import pandas as pd
 from scipy.signal import argrelextrema
@@ -12,9 +13,6 @@ class Pattern:
     confidence: float
     direction: str # "bullish" or "bearish"
     details: dict
-    push_count: int = 1
-    volume_score: float = 0.5
-    quality_grade: str = "B"
 
 class PatternRecognizer:
     def __init__(self, data: pd.DataFrame):
@@ -38,6 +36,7 @@ class PatternRecognizer:
         if idx2 == idx1: return 0
         return (val2 - val1) / (idx2 - idx1)
 
+<<<<<<< Updated upstream
     def _linear_fit(self, indices: np.ndarray, values: np.ndarray) -> Optional[Tuple[float, float, float]]:
         if len(indices) < 2:
             return None
@@ -61,27 +60,38 @@ class PatternRecognizer:
         return False
 
     def _calc_volume_score(self, start_idx, end_idx) -> float:
+=======
+    def detect_push_counts(self) -> np.ndarray:
+>>>>>>> Stashed changes
         """
-        Check if there is a volume spike during the pattern formation or breakout.
-        Avg volume in pattern vs Avg volume before.
+        Calculates the 'Push Count' for every bar.
+        Logic: A 'Push' is a sequence of candles in one direction with significant volume.
+        Simplified Trend Count:
+        - If Trend is UP, increment Push Count on every Pullback->NewHigh cycle?
+        - Or distinct impulses separated by volume?
+        Let's use "ZigZag" logic + Volume blocks.
         """
-        if start_idx <= 0: return 0.5
+        pushes = np.zeros(len(self.data))
+        # Simple heuristic: Count swings of at least X pips?
+        # User definition: "Huge block from volume".
+        # 1. Detect Volume Spikes (> 2.0 std dev)
+        # 2. Check price direction during spike.
         
-        pattern_vol = np.mean(self.vol[start_idx:end_idx+1])
-        # Lookback 50 bars
-        lookback = max(0, start_idx - 50)
-        baseline_vol = np.mean(self.vol[lookback:start_idx])
+        vol_mean = pd.Series(self.vol).rolling(50).mean()
+        vol_std = pd.Series(self.vol).rolling(50).std()
+        is_spike = self.vol > (vol_mean + 2 * vol_std)
         
-        if baseline_vol == 0: return 1.0
+        current_push = 0
+        direction = 0 # 1 up, -1 down
         
-        ratio = pattern_vol / baseline_vol
+        # This is a complex state machine for a simple vector. 
+        # For simplicity in this AI context, we will count "Swings" since the last trend reversal.
+        # But let's stick to the User's "Volume Block" idea.
+        # We will return a feature 'cycle_position' (1,2,3,4 for Up, -1,-2,-3 for Down)
+        # Approximate:
         
-        # Normalize to 0-1 score
-        # 1.0 ratio -> 0.5 score
-        # 2.0 ratio -> 1.0 score
-        # 0.5 ratio -> 0.2 score
-        score = min(1.0, ratio / 2.0)
-        return score
+        return pushes # Place holder, implementing fully inside AI trainer might be easier with pandas
+
 
     def detect_all(self) -> List[Pattern]:
         patterns = []
@@ -111,9 +121,6 @@ class PatternRecognizer:
                     if self.close[last_idx] > neckline:
                         continue
                     pattern_height = max(self.highs[p1], self.highs[p2]) - neckline
-                    
-                    vol_score = self._calc_volume_score(p1, p2)
-                    
                     patterns.append(Pattern(
                         name="Double Top",
                         index_start=p1,
@@ -123,11 +130,8 @@ class PatternRecognizer:
                         details={
                             "neckline": neckline, 
                             "height": pattern_height,
-                            "stop_loss": max(self.highs[p1], self.highs[p2]) + (pattern_height * 0.1) 
-                        },
-                        push_count=2, # 2 Peaks
-                        volume_score=vol_score,
-                        quality_grade="A"
+                            "stop_loss": max(self.highs[p1], self.highs[p2]) + (pattern_height * 0.1) # Buffer above peaks
+                        }
                     ))
 
         # Double Bottom
@@ -142,9 +146,6 @@ class PatternRecognizer:
                     if self.close[last_idx] < neckline:
                         continue
                     pattern_height = neckline - min(self.lows[t1], self.lows[t2])
-                    
-                    vol_score = self._calc_volume_score(t1, t2)
-
                     patterns.append(Pattern(
                         name="Double Bottom",
                         index_start=t1,
@@ -154,20 +155,20 @@ class PatternRecognizer:
                         details={
                             "neckline": neckline,
                             "height": pattern_height,
-                            "stop_loss": min(self.lows[t1], self.lows[t2]) - (pattern_height * 0.1)
-                        },
-                        push_count=2,
-                        volume_score=vol_score,
-                        quality_grade="A"
+                            "stop_loss": min(self.lows[t1], self.lows[t2]) - (pattern_height * 0.1) # Buffer below lows
+                        }
                     ))
         return patterns
 
     def detect_head_and_shoulders(self) -> List[Pattern]:
         patterns = []
         peaks = self.find_peaks(order=5)
+<<<<<<< Updated upstream
         last_idx = len(self.data) - 1
         # ... (Abbreviated for token limits, assuming previous logic + upgrades)
         # For brevity, I'll include the full logic but compressed or similar to previous
+=======
+>>>>>>> Stashed changes
         if len(peaks) >= 3:
             for i in range(len(peaks) - 2):
                 l_shoulder = peaks[i]
@@ -176,9 +177,10 @@ class PatternRecognizer:
                 h_val = self.highs[head]
                 l_val = self.highs[l_shoulder]
                 r_val = self.highs[r_shoulder]
-                
                 if h_val > l_val and h_val > r_val:
                     if abs(l_val - r_val) / l_val < 0.05:
+                        # Find neckline (troughs between)
+                        # Simplified: use average of troughs between L-H and H-R
                         troughs = self.find_troughs(order=5)
                         related_troughs = [t for t in troughs if l_shoulder < t < r_shoulder]
                         if not related_troughs: continue
@@ -186,9 +188,6 @@ class PatternRecognizer:
                         if self.close[last_idx] > neckline:
                             continue
                         pattern_height = h_val - neckline
-                        
-                        vol_score = self._calc_volume_score(l_shoulder, r_shoulder)
-                        
                         patterns.append(Pattern(
                             name="Head and Shoulders (Top)",
                             index_start=l_shoulder,
@@ -198,11 +197,8 @@ class PatternRecognizer:
                             details={
                                 "neckline": neckline,
                                 "height": pattern_height,
-                                "stop_loss": r_val + (pattern_height * 0.1)
-                            },
-                            push_count=3,
-                            volume_score=vol_score,
-                            quality_grade="A"
+                                "stop_loss": r_val + (pattern_height * 0.1) # Above right shoulder
+                            }
                         ))
         
         # Inverted H&S
@@ -224,9 +220,6 @@ class PatternRecognizer:
                         if self.close[last_idx] < neckline:
                             continue
                         pattern_height = neckline - h_val
-                        
-                        vol_score = self._calc_volume_score(l_shoulder, r_shoulder)
-                        
                         patterns.append(Pattern(
                             name="Head and Shoulders (Bottom)",
                             index_start=l_shoulder,
@@ -236,11 +229,8 @@ class PatternRecognizer:
                             details={
                                 "neckline": neckline,
                                 "height": pattern_height,
-                                "stop_loss": r_val - (pattern_height * 0.1)
-                            },
-                            push_count=3,
-                            volume_score=vol_score,
-                            quality_grade="A"
+                                "stop_loss": r_val - (pattern_height * 0.1) # Below right shoulder
+                            }
                         ))
         return patterns
 
@@ -248,6 +238,7 @@ class PatternRecognizer:
         patterns = []
         peaks = self.find_peaks(order=3)
         troughs = self.find_troughs(order=3)
+<<<<<<< Updated upstream
         if len(peaks) < 3 or len(troughs) < 3:
             return []
 
@@ -270,10 +261,25 @@ class PatternRecognizer:
             return []
 
         vol_score = self._calc_volume_score(start_idx, end_idx)
+=======
+        if len(peaks) < 3 or len(troughs) < 3: return []
+        recent_peaks = peaks[-3:]
+        recent_troughs = troughs[-3:]
+        if len(recent_peaks) < 2 or len(recent_troughs) < 2: return []
+        res_slope = self.get_slope(recent_peaks[0], recent_peaks[-1], self.highs[recent_peaks[0]], self.highs[recent_peaks[-1]])
+        sup_slope = self.get_slope(recent_troughs[0], recent_troughs[-1], self.lows[recent_troughs[0]], self.lows[recent_troughs[-1]])
+        
+        # Calculate Height at base (start of pattern)
+        start_idx = min(recent_peaks[0], recent_troughs[0])
+        end_idx = max(recent_peaks[-1], recent_troughs[-1])
+        # Approximate vertical height as max high - min low in the window
+        # This is a simplification. Ideally: distance between trendlines at start.
+>>>>>>> Stashed changes
         pattern_high = max(self.highs[start_idx:end_idx+1])
         pattern_low = min(self.lows[start_idx:end_idx+1])
         pattern_height = pattern_high - pattern_low
         details = {"height": pattern_height}
+<<<<<<< Updated upstream
         pushes = min(len(recent_peaks), len(recent_troughs))
 
         res_level = self._line_value(res_slope, res_intercept, end_idx)
@@ -460,4 +466,26 @@ class PatternRecognizer:
             details["stop_loss"] = upper_line
             patterns.append(Pattern("Bearish Diamond", start_idx, end_idx, 0.65, "bearish", details, 3, vol_score))
 
+=======
+        # Stop loss logic for triangles: Opposite side of the breakout swing
+        
+        if abs(res_slope) < 0.0001 and sup_slope > 0.0001:
+             details["stop_loss"] = self.lows[recent_troughs[-1]] # Most recent support low
+             patterns.append(Pattern("Ascending Triangle", recent_troughs[0], recent_peaks[-1], 0.75, "bullish", details))
+        elif res_slope < -0.0001 and abs(sup_slope) < 0.0001:
+             details["stop_loss"] = self.highs[recent_peaks[-1]] # Most recent resistance high
+             patterns.append(Pattern("Descending Triangle", recent_troughs[0], recent_peaks[-1], 0.75, "bearish", details))
+        elif res_slope < 0 and sup_slope > 0:
+            details["stop_loss"] = self.lows[recent_troughs[-1]] # Assume breakout up? Ambiguous. Backtester handles breakout dir.
+            # Symmetrics are tricky, let's just use recent range low for SL validation
+            patterns.append(Pattern("Symmetrical Triangle", recent_troughs[0], recent_peaks[-1], 0.7, "neutral", details))
+        elif res_slope > 0 and sup_slope > 0:
+            if sup_slope > res_slope:
+                details["stop_loss"] = self.highs[recent_peaks[-1]]
+                patterns.append(Pattern("Rising Wedge", recent_troughs[0], recent_peaks[-1], 0.8, "bearish", details))
+        elif res_slope < 0 and sup_slope < 0:
+            if res_slope < sup_slope:
+                 details["stop_loss"] = self.lows[recent_troughs[-1]]
+                 patterns.append(Pattern("Falling Wedge", recent_troughs[0], recent_peaks[-1], 0.8, "bullish", details))
+>>>>>>> Stashed changes
         return patterns

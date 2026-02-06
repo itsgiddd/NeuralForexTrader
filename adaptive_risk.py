@@ -1,6 +1,5 @@
-import MetaTrader5 as mt5
-
 class AdaptiveRiskManager:
+<<<<<<< Updated upstream
     """
     Calculates position size dynamically based on:
     - Account Money Management Curve (Grow aggressively when small)
@@ -66,3 +65,7 @@ class AdaptiveRiskManager:
              lot = round(lot / step) * step
              
         return lot
+=======
+    def calculate_lot_size(self, symbol, entry, sl, score, account_info, symbol_info):
+        return 0.01
+>>>>>>> Stashed changes

@@ -3,24 +3,20 @@ from pattern_recognition import PatternRecognizer
 from trade_validator import TradeValidator
 from adaptive_risk import AdaptiveRiskManager
 from trading_memory import TradingMemory
+from daily_planner import DailyPlanner
 import pandas as pd
 
 class AIBrain:
     """
-    Coordinator mimicking human brain layers:
-    1. Context (Occipital/Parietal)
-    2. Pattern (Temporal)
-    3. Validation (Pre-frontal)
-    4. Memory (Hippocampus)
-    5. Risk (Amygdala regulation)
+    Human-like AI Brain with Daily Planning.
+    Only trades in the direction of the daily bias.
     """
     def __init__(self):
         self.market_analyzer = MarketContextAnalyzer()
-        # PatternRecognizer is instantiated per data slice usually, or we can keep a persistent one?
-        # Usually per data. We will instantiate it inside 'think'.
         self.trade_validator = TradeValidator()
         self.risk_manager = AdaptiveRiskManager()
         self.memory = TradingMemory()
+<<<<<<< Updated upstream
         self.reasoning_engine = ReasoningEngine()
         self.required_columns = {"open", "high", "low", "close"}
 
@@ -72,41 +68,72 @@ class AIBrain:
 
         if len(data_h1) < 60 or len(data_h4) < 50 or len(data_d1) < 20:
             return {"decision": "WAIT", "reason": "Insufficient market history"}
+=======
+        self.planner = DailyPlanner()
+        
+    def set_daily_plan(self, plan: dict):
+        """Set the daily plan from external source."""
+        self.planner.plan = plan
+        
+    def think(self, symbol: str, data_h1: pd.DataFrame, data_h4: pd.DataFrame, data_d1: pd.DataFrame, account_info, symbol_info) -> dict:
+        # 0. Check Daily Bias
+        daily_bias = self.planner.get_bias(symbol)
+        if daily_bias == "NEUTRAL":
+            return {"decision": "REJECT", "reason": "Daily Bias: NEUTRAL - No trading"}
+        
+        # 1. Check Memory
+        if not self.memory.can_trade(symbol):
+            return {"decision": "REJECT", "reason": "Memory Block"}
+>>>>>>> Stashed changes
             
-        # 1. Market Context
+        # 2. Market Context
         market_state = self.market_analyzer.get_market_state(symbol, data_h1, data_h4, data_d1)
         
-        # 2. Pattern Recognition (on Data H1/H4? Usually patterns on H1 or H4)
-        # We assume H1 for patterns for now, or we iterate. 
-        # For simplicity, let's say we check H1 patterns.
-        recognizer = PatternRecognizer(data_h1)
-        patterns = recognizer.detect_all()
+        # 3. Pattern Recognition - All Timeframes
+        all_patterns = []
         
-        # Filter freshness
-        current_len = len(data_h1)
-        fresh_patterns = [p for p in patterns if p.index_end >= current_len - 2]
+        for tf_name, df in [('H1', data_h1), ('H4', data_h4), ('D1', data_d1)]:
+            if df is None: continue
+            recognizer = PatternRecognizer(df)
+            patterns = recognizer.detect_all()
+            fresh = [p for p in patterns if p.index_end >= len(df) - 2]
+            for p in fresh:
+                all_patterns.append((tf_name, p, df))
         
-        if not fresh_patterns:
+        if not all_patterns:
             return {"decision": "WAIT", "reason": "No fresh patterns"}
+        
+        # 4. Filter by Daily Bias
+        valid_patterns = []
+        for tf, pattern, data in all_patterns:
+            pattern_dir = 'bullish' if pattern.direction == 'bullish' else 'bearish'
+            bias_match = (daily_bias == "LONG" and pattern_dir == "bullish") or \
+                         (daily_bias == "SHORT" and pattern_dir == "bearish")
+            if bias_match:
+                valid_patterns.append((tf, pattern, data))
+        
+        if not valid_patterns:
+            return {"decision": "REJECT", "reason": f"Patterns don't match {daily_bias} bias"}
             
-        # 3. Validation & Selection
+        # 5. Validation & Selection
         best_decision = None
         best_pattern = None
+<<<<<<< Updated upstream
         best_rationale = []
+=======
+        best_tf = None
+        best_data = None
+>>>>>>> Stashed changes
         
-        for pattern in fresh_patterns:
-            # Extract features for this pattern (Stub for features needed by validator)
-            # In live_trader we extract complex features. 
-            # Here let's pass dummy features or minimal needed.
-            # Validator needs: vol_anomaly -> pattern.volume_score
-            features = {"vol_anomaly": pattern.volume_score * 2} # Approximate mapping
-            
+        for tf, pattern, data in valid_patterns:
+            features = {"vol_anomaly": pattern.volume_score * 2}
             decision = self.trade_validator.validate(pattern, market_state, features)
             
             if decision.should_trade:
                 if best_decision is None or decision.confluence_score > best_decision.confluence_score:
                     best_decision = decision
                     best_pattern = pattern
+<<<<<<< Updated upstream
                     best_rationale = decision.rationale
         
         if not best_decision or not best_decision.should_trade:
@@ -152,27 +179,45 @@ class AIBrain:
             sl,
             tp
         )
+=======
+                    best_tf = tf
+                    best_data = data
+        
+        if not best_decision or not best_decision.should_trade:
+            msg = best_decision.rejection_reason if best_decision else "All patterns rejected"
+            return {"decision": "REJECT", "reason": msg}
+             
+        # 6. Risk Calculation
+        price = best_data['close'].iloc[-1]
+        sl = best_pattern.details.get('stop_loss', price)
+>>>>>>> Stashed changes
         
         lot = self.risk_manager.calculate_lot_size(
-            symbol, 
-            price, 
-            sl, 
+            symbol, price, sl, 
             best_decision.confluence_score,
-            account_info,
-            symbol_info
+            account_info, symbol_info
         )
         
         if lot <= 0:
+<<<<<<< Updated upstream
              return {"decision": "REJECT", "reason": "Risk Calc = 0 Lot", "reasoning": best_rationale + ["Rejected: lot size below minimum"]}
+=======
+            return {"decision": "REJECT", "reason": "Risk Calc = 0 Lot"}
+>>>>>>> Stashed changes
              
         return {
             "decision": "TRADE",
             "pattern": best_pattern,
             "lot": lot,
             "sl": sl,
+<<<<<<< Updated upstream
             "tp": tp,
             "reason": f"Score {best_decision.confluence_score} | {best_decision.rejection_reason} | RR {rr:.2f}",
             "reasoning": reasoning_notes,
+=======
+            "tp": best_pattern.details.get('height', 0) + price,
+            "reason": f"[{best_tf}] Score {best_decision.confluence_score} | {daily_bias}",
+>>>>>>> Stashed changes
             "confidence": best_decision.confidence,
             "market_state": market_state
         }

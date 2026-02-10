@@ -986,7 +986,7 @@ class TradingApp(QMainWindow):
             self.btn_theme.setText("Dark Mode")
 
     def _on_start(self):
-        """Start the ZP trade scanner — uses actual zp_trade_now.py generate_signal() logic."""
+        """Start the ZP trade scanner — H1 primary with M15 confirmation for intraday trades."""
         try:
             if not self.mt5_connector.is_connected():
                 self._log("Connect MT5 first")
@@ -1003,14 +1003,17 @@ class TradingApp(QMainWindow):
             risk_pct = self._float(self.inp_risk, 8) / 100.0
             min_conf = self._float(self.inp_conf, 65) / 100.0
             mode_str = f"Fixed {lot}" if use_fixed else f"Adaptive {risk_pct:.0%} risk"
-            self._log(f"ZP Scanner started | {mode_str} | Min conf: {min_conf:.0%} | Scanning every 60s")
+            self._log(f"ZP Intraday Scanner | H1 + M15 confirm | {mode_str} | Min conf: {min_conf:.0%}")
 
             def _zp_loop():
                 import MetaTrader5 as mt5_lib
+                import numpy as np
                 import pandas as pd
-                from app.zeropoint_signal import ZeroPointEngine
-
-                zp_engine = ZeroPointEngine()
+                from app.zeropoint_signal import (
+                    compute_zeropoint_state, ZeroPointSignal,
+                    SL_BUFFER_PCT, TP1_MULT, ATR_MULTIPLIER,
+                    SWING_LOOKBACK, SL_ATR_MIN_MULT,
+                )
 
                 while getattr(self, '_zp_running', False):
                     try:
@@ -1048,34 +1051,112 @@ class TradingApp(QMainWindow):
 
                             mt5_lib.symbol_select(sym_resolved, True)
 
-                            rates_h4 = mt5_lib.copy_rates_from_pos(sym_resolved, mt5_lib.TIMEFRAME_H4, 0, 200)
+                            # H1 = primary signal, M15 = confirmation
                             rates_h1 = mt5_lib.copy_rates_from_pos(sym_resolved, mt5_lib.TIMEFRAME_H1, 0, 200)
+                            rates_m15 = mt5_lib.copy_rates_from_pos(sym_resolved, mt5_lib.TIMEFRAME_M15, 0, 200)
 
-                            df_h4 = None
-                            if rates_h4 is not None and len(rates_h4) >= 20:
-                                df_h4 = pd.DataFrame(rates_h4)
-                                df_h4["time"] = pd.to_datetime(df_h4["time"], unit="s")
                             df_h1 = None
                             if rates_h1 is not None and len(rates_h1) >= 20:
                                 df_h1 = pd.DataFrame(rates_h1)
                                 df_h1["time"] = pd.to_datetime(df_h1["time"], unit="s")
-                            if df_h4 is None:
+                            df_m15 = None
+                            if rates_m15 is not None and len(rates_m15) >= 20:
+                                df_m15 = pd.DataFrame(rates_m15)
+                                df_m15["time"] = pd.to_datetime(df_m15["time"], unit="s")
+                            if df_h1 is None:
                                 continue
 
-                            # Use generate_signal() — actual profitable logic
-                            # Accepts ANY active ZP position with age penalty on confidence
-                            sig = zp_engine.generate_signal(sym_resolved, df_h4, df_h1)
-                            if sig is None:
+                            # Compute ZP on H1
+                            zp = compute_zeropoint_state(df_h1)
+                            if zp is None or len(zp) < 2:
                                 continue
 
-                            # Apply confidence filter
-                            if sig.confidence < min_conf:
+                            last = zp.iloc[-1]
+                            pos_val = int(last.get("pos", 0))
+                            if pos_val == 0:
                                 continue
 
+                            direction = "BUY" if pos_val == 1 else "SELL"
+                            entry = float(last["close"])
+                            atr_val = float(last["atr"])
+                            if atr_val <= 0 or np.isnan(atr_val):
+                                continue
+
+                            trailing_stop = float(last.get("xATRTrailingStop", 0))
+                            if trailing_stop <= 0:
+                                continue
+
+                            # Check freshness — fresh flip or recent (within 3 bars)
+                            bars_since = int(last.get("bars_since_flip", 999))
+                            is_fresh = bars_since <= 3
+
+                            # SL from trailing stop with buffer
+                            sl = trailing_stop
+                            buffer = atr_val * SL_BUFFER_PCT
+                            if direction == "BUY":
+                                sl = sl - buffer
+                                tp1 = entry + atr_val * TP1_MULT
+                            else:
+                                sl = sl + buffer
+                                tp1 = entry - atr_val * TP1_MULT
+
+                            # Skip if no room to profit
+                            if direction == "BUY" and entry >= tp1:
+                                continue
+                            if direction == "SELL" and entry <= tp1:
+                                continue
+
+                            sl_dist = abs(entry - sl)
+                            tp_dist = abs(tp1 - entry)
+                            rr = tp_dist / sl_dist if sl_dist > 0 else 0
+
+                            # M15 confirmation
+                            m15_conf = False
+                            if df_m15 is not None:
+                                zp_m15 = compute_zeropoint_state(df_m15)
+                                if zp_m15 is not None and len(zp_m15) > 0:
+                                    m15_pos = int(zp_m15.iloc[-1].get("pos", 0))
+                                    if direction == "BUY" and m15_pos == 1:
+                                        m15_conf = True
+                                    elif direction == "SELL" and m15_pos == -1:
+                                        m15_conf = True
+
+                            # Confidence scoring
+                            conf = 0.65
+                            if is_fresh:
+                                conf += 0.15
+                            if m15_conf:
+                                conf += 0.10
+                            if rr >= 2.0:
+                                conf += 0.05
+                            elif rr >= 1.5:
+                                conf += 0.03
+                            # Age penalty for non-fresh
+                            if not is_fresh:
+                                age_penalty = min(bars_since * 0.03, 0.20)
+                                conf -= age_penalty
+                            conf = max(0.40, min(conf, 0.98))
+                            tier = "S" if (is_fresh and m15_conf) else ("A" if m15_conf or is_fresh else "B")
+
+                            if conf < min_conf:
+                                continue
+
+                            sig = ZeroPointSignal(
+                                symbol=sym_resolved, direction=direction,
+                                entry_price=entry, stop_loss=sl,
+                                tp1=tp1, tp2=tp1, tp3=tp1,
+                                atr_value=atr_val, confidence=conf,
+                                signal_time=datetime.now(), timeframe="H1",
+                                tier=tier, trailing_stop=trailing_stop,
+                                risk_reward=rr,
+                            )
+
+                            m15_tag = " [M15 ✓]" if m15_conf else ""
+                            fresh_tag = " FRESH" if is_fresh else f" age={bars_since}b"
                             self._log(
-                                f"  {symbol}: ZP {sig.direction} "
-                                f"R:R={sig.risk_reward:.2f} conf={sig.confidence:.0%} "
-                                f"tier={sig.tier}"
+                                f"  {symbol}: H1 {sig.direction} "
+                                f"R:R={rr:.2f} conf={conf:.0%} "
+                                f"tier={tier}{fresh_tag}{m15_tag}"
                             )
                             signals.append((sig, sym_resolved))
 
@@ -1087,12 +1168,12 @@ class TradingApp(QMainWindow):
                                 if lot > 0:
                                     self._zp_place_trade(sig, sym_resolved, lot)
                         else:
-                            self._log("Scan: no signals above confidence threshold")
+                            self._log("Scan: no H1 signals above threshold")
 
                     except Exception as e:
                         self._log(f"Scan error: {e}")
 
-                    # Wait 60s between scans
+                    # Scan every 60s — H1 data updates frequently
                     for _ in range(60):
                         if not getattr(self, '_zp_running', False):
                             break

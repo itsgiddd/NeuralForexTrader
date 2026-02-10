@@ -1214,7 +1214,7 @@ class TradingApp(QMainWindow):
             return fixed_lot
 
     def _zp_place_trade(self, sig, sym_resolved, lot):
-        """Place a trade exactly like zp_trade_now.py."""
+        """Place a trade with margin safety checks."""
         try:
             import MetaTrader5 as mt5_lib
 
@@ -1223,12 +1223,77 @@ class TradingApp(QMainWindow):
                 self._log(f"Cannot get info for {sym_resolved}")
                 return
 
+            # --- Margin safety: check free margin before placing ---
+            acct = mt5_lib.account_info()
+            if acct is None:
+                self._log(f"Skip {sym_resolved}: cannot read account info")
+                return
+
+            free_margin = acct.margin_free
+            equity = acct.equity
+            margin_used = acct.margin
+
+            # Don't trade if margin level would drop below 150%
+            # margin_level = equity / (margin_used + new_margin) * 100
+            # We want: equity / (margin_used + new_margin) >= 1.50
             if sig.direction == "BUY":
                 order_type = mt5_lib.ORDER_TYPE_BUY
                 price = sym_info.ask
             else:
                 order_type = mt5_lib.ORDER_TYPE_SELL
                 price = sym_info.bid
+
+            # Use order_check to see how much margin this trade needs
+            check_request = {
+                "action": mt5_lib.TRADE_ACTION_DEAL,
+                "symbol": sym_resolved,
+                "volume": lot,
+                "type": order_type,
+                "price": price,
+            }
+            check = mt5_lib.order_check(check_request)
+            if check is None:
+                self._log(f"Skip {sym_resolved}: order_check failed")
+                return
+
+            needed_margin = check.margin
+            if needed_margin <= 0:
+                self._log(f"Skip {sym_resolved}: margin check returned 0")
+                return
+
+            # Check if placing this trade keeps margin level above 150%
+            new_total_margin = margin_used + needed_margin
+            if new_total_margin > 0:
+                projected_level = (equity / new_total_margin) * 100
+            else:
+                projected_level = 9999
+
+            if projected_level < 150:
+                # Try reducing lot to fit within margin
+                vol_step = sym_info.volume_step
+                vol_min = sym_info.volume_min
+                # Max margin we can use: equity / 1.50 - margin_used
+                max_new_margin = (equity / 1.50) - margin_used
+                if max_new_margin <= 0:
+                    self._log(
+                        f"<span style='color:#D4A040'>Skip {sym_resolved}: margin level {projected_level:.0f}% "
+                        f"(need 150%+) | free=${free_margin:.0f}</span>"
+                    )
+                    return
+                # Scale lot proportionally
+                scale = max_new_margin / needed_margin
+                reduced_lot = lot * scale
+                reduced_lot = round(reduced_lot / vol_step) * vol_step
+                reduced_lot = max(vol_min, reduced_lot)
+                if reduced_lot < vol_min:
+                    self._log(
+                        f"<span style='color:#D4A040'>Skip {sym_resolved}: lot too small after margin fit</span>"
+                    )
+                    return
+                self._log(
+                    f"    {sym_resolved}: lot {lot:.2f} -> {reduced_lot:.2f} (margin safety)"
+                )
+                lot = reduced_lot
 
             digits = sym_info.digits
             sl = round(sig.stop_loss, digits)
@@ -1251,10 +1316,13 @@ class TradingApp(QMainWindow):
 
             result = mt5_lib.order_send(request)
             if result and result.retcode == mt5_lib.TRADE_RETCODE_DONE:
+                # Show updated margin after trade
+                acct2 = mt5_lib.account_info()
+                ml = f" ML={acct2.margin_level:.0f}%" if acct2 and acct2.margin_level else ""
                 self._log(
                     f"<span style='color:#4A8C5D'>TRADE: {sig.direction} {sym_resolved} "
-                    f"@ {price:.5f} | SL={sl} TP={tp} | "
-                    f"R:R={sig.risk_reward:.2f} Tier={sig.tier}</span>"
+                    f"{lot:.2f}L @ {price:.5f} | SL={sl} TP={tp} | "
+                    f"R:R={sig.risk_reward:.2f} Tier={sig.tier}{ml}</span>"
                 )
             else:
                 # Try other fill modes
@@ -1264,7 +1332,7 @@ class TradingApp(QMainWindow):
                     if result and result.retcode == mt5_lib.TRADE_RETCODE_DONE:
                         self._log(
                             f"<span style='color:#4A8C5D'>TRADE: {sig.direction} {sym_resolved} "
-                            f"@ {price:.5f} | SL={sl} TP={tp}</span>"
+                            f"{lot:.2f}L @ {price:.5f} | SL={sl} TP={tp}</span>"
                         )
                         return
                 rc = result.retcode if result else "?"

@@ -441,11 +441,6 @@ class TradingApp(QMainWindow):
         self.inp_risk.setFixedWidth(70)
         mode_grid.addWidget(self.inp_risk, 1, 1)
 
-        mode_grid.addWidget(QLabel("Min Confidence %:"), 2, 0)
-        self.inp_conf = QLineEdit("65")
-        self.inp_conf.setFixedWidth(70)
-        mode_grid.addWidget(self.inp_conf, 2, 1)
-
         settings_row.addWidget(mode_box)
 
         # Right: Trade Monitor
@@ -929,7 +924,6 @@ class TradingApp(QMainWindow):
             'fixed_lots': self.chk_fixed_lots.isChecked(),
             'lot_size': self.inp_lot.text(),
             'risk_pct': self.inp_risk.text(),
-            'confidence_pct': self.inp_conf.text(),
             'max_loss': self.inp_maxloss.text(),
             'be_pips': self.inp_be.text(),
             'stall_min': self.inp_stall.text(),
@@ -957,7 +951,6 @@ class TradingApp(QMainWindow):
             self.chk_fixed_lots.setChecked(s.get('fixed_lots', True))
             self.inp_lot.setText(s.get('lot_size', '0.40'))
             self.inp_risk.setText(s.get('risk_pct', '8'))
-            self.inp_conf.setText(s.get('confidence_pct', '65'))
             self.inp_maxloss.setText(s.get('max_loss', '80'))
             self.inp_be.setText(s.get('be_pips', '15'))
             self.inp_stall.setText(s.get('stall_min', '30'))
@@ -1001,9 +994,8 @@ class TradingApp(QMainWindow):
             use_fixed = self.chk_fixed_lots.isChecked()
             lot = self._float(self.inp_lot, 0.40)
             risk_pct = self._float(self.inp_risk, 8) / 100.0
-            min_conf = self._float(self.inp_conf, 65) / 100.0
             mode_str = f"Fixed {lot}" if use_fixed else f"Adaptive {risk_pct:.0%} risk"
-            self._log(f"ZP Intraday Scanner | H1 + M15 confirm | {mode_str} | Min conf: {min_conf:.0%}")
+            self._log(f"ZP Intraday Scanner | H1 + M15 confirm | {mode_str}")
 
             def _zp_loop():
                 import MetaTrader5 as mt5_lib
@@ -1021,7 +1013,6 @@ class TradingApp(QMainWindow):
                         use_fixed = self.chk_fixed_lots.isChecked()
                         fixed_lot = self._float(self.inp_lot, 0.40)
                         risk_pct = self._float(self.inp_risk, 8) / 100.0
-                        min_conf = self._float(self.inp_conf, 65) / 100.0
 
                         # Track which symbols already have open positions
                         open_positions = mt5_lib.positions_get()
@@ -1138,9 +1129,6 @@ class TradingApp(QMainWindow):
                             conf = max(0.40, min(conf, 0.98))
                             tier = "S" if (is_fresh and m15_conf) else ("A" if m15_conf or is_fresh else "B")
 
-                            if conf < min_conf:
-                                continue
-
                             sig = ZeroPointSignal(
                                 symbol=sym_resolved, direction=direction,
                                 entry_price=entry, stop_loss=sl,
@@ -1168,7 +1156,7 @@ class TradingApp(QMainWindow):
                                 if lot > 0:
                                     self._zp_place_trade(sig, sym_resolved, lot)
                         else:
-                            self._log("Scan: no H1 signals above threshold")
+                            self._log("Scan: no H1 signals found")
 
                     except Exception as e:
                         self._log(f"Scan error: {e}")

@@ -995,7 +995,7 @@ class TradingApp(QMainWindow):
             lot = self._float(self.inp_lot, 0.40)
             risk_pct = self._float(self.inp_risk, 8) / 100.0
             mode_str = f"Fixed {lot}" if use_fixed else f"Adaptive {risk_pct:.0%} risk"
-            self._log(f"ZP Intraday Scanner | H1 + M15 confirm | {mode_str}")
+            self._log(f"ZP Scanner | H4 + H1 confirm | {mode_str}")
 
             def _zp_loop():
                 import MetaTrader5 as mt5_lib
@@ -1042,23 +1042,23 @@ class TradingApp(QMainWindow):
 
                             mt5_lib.symbol_select(sym_resolved, True)
 
-                            # H1 = primary signal, M15 = confirmation
+                            # H4 = primary signal, H1 = confirmation
+                            rates_h4 = mt5_lib.copy_rates_from_pos(sym_resolved, mt5_lib.TIMEFRAME_H4, 0, 200)
                             rates_h1 = mt5_lib.copy_rates_from_pos(sym_resolved, mt5_lib.TIMEFRAME_H1, 0, 200)
-                            rates_m15 = mt5_lib.copy_rates_from_pos(sym_resolved, mt5_lib.TIMEFRAME_M15, 0, 200)
 
+                            df_h4 = None
+                            if rates_h4 is not None and len(rates_h4) >= 20:
+                                df_h4 = pd.DataFrame(rates_h4)
+                                df_h4["time"] = pd.to_datetime(df_h4["time"], unit="s")
                             df_h1 = None
                             if rates_h1 is not None and len(rates_h1) >= 20:
                                 df_h1 = pd.DataFrame(rates_h1)
                                 df_h1["time"] = pd.to_datetime(df_h1["time"], unit="s")
-                            df_m15 = None
-                            if rates_m15 is not None and len(rates_m15) >= 20:
-                                df_m15 = pd.DataFrame(rates_m15)
-                                df_m15["time"] = pd.to_datetime(df_m15["time"], unit="s")
-                            if df_h1 is None:
+                            if df_h4 is None:
                                 continue
 
-                            # Compute ZP on H1
-                            zp = compute_zeropoint_state(df_h1)
+                            # Compute ZP on H4
+                            zp = compute_zeropoint_state(df_h4)
                             if zp is None or len(zp) < 2:
                                 continue
 
@@ -1106,16 +1106,16 @@ class TradingApp(QMainWindow):
                                 self._log(f"  {symbol}: SKIP R:R={rr:.2f} < 1.5")
                                 continue
 
-                            # M15 confirmation
-                            m15_conf = False
-                            if df_m15 is not None:
-                                zp_m15 = compute_zeropoint_state(df_m15)
-                                if zp_m15 is not None and len(zp_m15) > 0:
-                                    m15_pos = int(zp_m15.iloc[-1].get("pos", 0))
-                                    if direction == "BUY" and m15_pos == 1:
-                                        m15_conf = True
-                                    elif direction == "SELL" and m15_pos == -1:
-                                        m15_conf = True
+                            # H1 confirmation
+                            h1_conf = False
+                            if df_h1 is not None:
+                                zp_h1 = compute_zeropoint_state(df_h1)
+                                if zp_h1 is not None and len(zp_h1) > 0:
+                                    h1_pos = int(zp_h1.iloc[-1].get("pos", 0))
+                                    if direction == "BUY" and h1_pos == 1:
+                                        h1_conf = True
+                                    elif direction == "SELL" and h1_pos == -1:
+                                        h1_conf = True
 
                             # Quality score for ranking (higher = better trade)
                             # R:R is king — a 3.0 R:R trade is worth way more than a 1.5
@@ -1123,31 +1123,31 @@ class TradingApp(QMainWindow):
                             score += min(rr, 5.0) * 20        # R:R contribution (max 100)
                             if is_fresh:
                                 score += 30                    # Fresh flip is a strong signal
-                            if m15_conf:
-                                score += 20                    # M15 alignment
+                            if h1_conf:
+                                score += 20                    # H1 alignment
                             # Age penalty — stale signals lose points
                             if not is_fresh:
                                 score -= min(bars_since * 1.0, 40)
                             score = max(0, score)
 
-                            tier = "S" if (is_fresh and m15_conf) else ("A" if m15_conf or is_fresh else "B")
+                            tier = "S" if (is_fresh and h1_conf) else ("A" if h1_conf or is_fresh else "B")
 
                             sig = ZeroPointSignal(
                                 symbol=sym_resolved, direction=direction,
                                 entry_price=entry, stop_loss=sl,
                                 tp1=tp1, tp2=tp1, tp3=tp1,
                                 atr_value=atr_val, confidence=score / 100.0,
-                                signal_time=datetime.now(), timeframe="H1",
+                                signal_time=datetime.now(), timeframe="H4",
                                 tier=tier, trailing_stop=trailing_stop,
                                 risk_reward=rr,
                             )
 
-                            m15_tag = " [M15 ✓]" if m15_conf else ""
+                            h1_tag = " [H1 ✓]" if h1_conf else ""
                             fresh_tag = " FRESH" if is_fresh else f" age={bars_since}b"
                             self._log(
-                                f"  {symbol}: H1 {sig.direction} "
+                                f"  {symbol}: H4 {sig.direction} "
                                 f"R:R={rr:.2f} score={score:.0f} "
-                                f"tier={tier}{fresh_tag}{m15_tag}"
+                                f"tier={tier}{fresh_tag}{h1_tag}"
                             )
                             signals.append((sig, sym_resolved, score))
 
@@ -1171,8 +1171,8 @@ class TradingApp(QMainWindow):
                     except Exception as e:
                         self._log(f"Scan error: {e}")
 
-                    # Scan every 60s — H1 data updates frequently
-                    for _ in range(60):
+                    # Scan every 5 min — H4 candles close every 4 hours
+                    for _ in range(300):
                         if not getattr(self, '_zp_running', False):
                             break
                         _time.sleep(1)

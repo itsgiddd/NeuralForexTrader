@@ -102,7 +102,7 @@ def compute_zeropoint_state(df: pd.DataFrame) -> Optional[pd.DataFrame]:
             (df["high"] - prev_close).abs(),
             (df["low"] - prev_close).abs(),
         ], axis=1).max(axis=1)
-        atr = tr.rolling(ATR_PERIOD).mean()
+        atr = tr.ewm(alpha=1.0 / ATR_PERIOD, adjust=False).mean()
         n_loss = ATR_MULTIPLIER * atr
 
         close = df["close"].values
@@ -565,7 +565,7 @@ class ZeroPointEngine:
                 (df["high"] - prev_close).abs(),
                 (df["low"] - prev_close).abs(),
             ], axis=1).max(axis=1)
-            atr = tr.rolling(ATR_PERIOD).mean()
+            atr = tr.ewm(alpha=1.0 / ATR_PERIOD, adjust=False).mean()
             n_loss = ATR_MULTIPLIER * atr
 
             close = df["close"].values

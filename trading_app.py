@@ -17,8 +17,20 @@ from PySide6.QtWidgets import (
     QGroupBox, QTableWidget, QTableWidgetItem, QTextEdit,
     QHeaderView, QFrame, QAbstractItemView,
 )
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QColor
+
+# Global crash handler — writes to crash.log so we can debug after a crash
+import traceback as _tb
+def _global_exception_hook(exc_type, exc_value, exc_tb):
+    crash_msg = ''.join(_tb.format_exception(exc_type, exc_value, exc_tb))
+    try:
+        with open('crash.log', 'a') as f:
+            f.write(f"\n{'='*60}\n{datetime.now()}\n{crash_msg}\n")
+    except Exception:
+        pass
+    sys.__excepthook__(exc_type, exc_value, exc_tb)
+sys.excepthook = _global_exception_hook
 
 # Safe imports — show clear errors instead of silent crashes
 _IMPORT_ERRORS = []
@@ -321,6 +333,7 @@ ALL_PAIRS = [
 
 
 class TradingApp(QMainWindow):
+    _log_signal = Signal(str)
 
     def __init__(self):
         super().__init__()
@@ -339,6 +352,9 @@ class TradingApp(QMainWindow):
 
         self._build_ui()
         self._load_settings()
+
+        # Thread-safe logging
+        self._log_signal.connect(self._log_on_main_thread)
 
         # Live update timer
         self.timer = QTimer(self)
@@ -440,6 +456,11 @@ class TradingApp(QMainWindow):
         self.inp_risk = QLineEdit("8")
         self.inp_risk.setFixedWidth(70)
         mode_grid.addWidget(self.inp_risk, 1, 1)
+
+        mode_grid.addWidget(QLabel("Min Conf %:"), 2, 0)
+        self.inp_conf = QLineEdit("65")
+        self.inp_conf.setFixedWidth(70)
+        mode_grid.addWidget(self.inp_conf, 2, 1)
 
         settings_row.addWidget(mode_box)
 
@@ -558,6 +579,15 @@ class TradingApp(QMainWindow):
     # Helpers
     # ------------------------------------------------------------------
     def _log(self, msg):
+        if threading.current_thread() is not threading.main_thread():
+            try:
+                self._log_signal.emit(msg)
+            except RuntimeError:
+                pass
+            return
+        self._log_on_main_thread(msg)
+
+    def _log_on_main_thread(self, msg):
         ts = datetime.now().strftime('%H:%M:%S')
         self.log_view.append(f"<span style='color:#B0AEA5'>[{ts}]</span> {msg}")
         bar = self.log_view.verticalScrollBar()
@@ -924,6 +954,7 @@ class TradingApp(QMainWindow):
             'fixed_lots': self.chk_fixed_lots.isChecked(),
             'lot_size': self.inp_lot.text(),
             'risk_pct': self.inp_risk.text(),
+            'min_conf': self.inp_conf.text(),
             'max_loss': self.inp_maxloss.text(),
             'be_pips': self.inp_be.text(),
             'stall_min': self.inp_stall.text(),
@@ -951,6 +982,7 @@ class TradingApp(QMainWindow):
             self.chk_fixed_lots.setChecked(s.get('fixed_lots', True))
             self.inp_lot.setText(s.get('lot_size', '0.40'))
             self.inp_risk.setText(s.get('risk_pct', '8'))
+            self.inp_conf.setText(s.get('min_conf', '65'))
             self.inp_maxloss.setText(s.get('max_loss', '80'))
             self.inp_be.setText(s.get('be_pips', '15'))
             self.inp_stall.setText(s.get('stall_min', '30'))
@@ -979,7 +1011,7 @@ class TradingApp(QMainWindow):
             self.btn_theme.setText("Dark Mode")
 
     def _on_start(self):
-        """Start the ZP trade scanner — H1 primary with M15 confirmation for intraday trades."""
+        """Start the ZP trade scanner — uses actual zp_trade_now.py generate_signal() logic."""
         try:
             if not self.mt5_connector.is_connected():
                 self._log("Connect MT5 first")
@@ -994,18 +1026,16 @@ class TradingApp(QMainWindow):
             use_fixed = self.chk_fixed_lots.isChecked()
             lot = self._float(self.inp_lot, 0.40)
             risk_pct = self._float(self.inp_risk, 8) / 100.0
+            min_conf = self._float(self.inp_conf, 65) / 100.0
             mode_str = f"Fixed {lot}" if use_fixed else f"Adaptive {risk_pct:.0%} risk"
-            self._log(f"ZP Intraday Scanner | H1 + M15 confirm | {mode_str}")
+            self._log(f"ZP Scanner started | {mode_str} | Min conf: {min_conf:.0%} | Scanning every 60s")
 
             def _zp_loop():
                 import MetaTrader5 as mt5_lib
-                import numpy as np
                 import pandas as pd
-                from app.zeropoint_signal import (
-                    compute_zeropoint_state, ZeroPointSignal,
-                    SL_BUFFER_PCT, TP1_MULT, ATR_MULTIPLIER,
-                    SWING_LOOKBACK, SL_ATR_MIN_MULT,
-                )
+                from app.zeropoint_signal import ZeroPointEngine
+
+                zp_engine = ZeroPointEngine()
 
                 while getattr(self, '_zp_running', False):
                     try:
@@ -1013,53 +1043,14 @@ class TradingApp(QMainWindow):
                         use_fixed = self.chk_fixed_lots.isChecked()
                         fixed_lot = self._float(self.inp_lot, 0.40)
                         risk_pct = self._float(self.inp_risk, 8) / 100.0
+                        min_conf = self._float(self.inp_conf, 65) / 100.0
 
-                        # Check open positions — close if H1 ZP flipped on CONFIRMED bar
+                        # Track which symbols already have open positions
                         open_positions = mt5_lib.positions_get()
                         open_symbols = set()
                         if open_positions:
                             for pos in open_positions:
-                                pos_sym = pos.symbol
-                                pos_norm = pos_sym.upper().replace(".", "").replace("#", "")
-                                open_symbols.add(pos_norm)
-
-                                try:
-                                    rates = mt5_lib.copy_rates_from_pos(pos_sym, mt5_lib.TIMEFRAME_H1, 0, 200)
-                                    if rates is not None and len(rates) >= 20:
-                                        df_tmp = pd.DataFrame(rates)
-                                        df_tmp["time"] = pd.to_datetime(df_tmp["time"], unit="s")
-                                        zp_tmp = compute_zeropoint_state(df_tmp)
-                                        if zp_tmp is not None and len(zp_tmp) >= 3:
-                                            # Use second-to-last bar (last CONFIRMED/CLOSED candle)
-                                            confirmed = zp_tmp.iloc[-2]
-                                            zp_dir = int(confirmed.get("pos", 0))
-                                            trade_is_buy = pos.type == 0
-                                            zp_is_buy = zp_dir == 1
-
-                                            if zp_dir != 0 and trade_is_buy != zp_is_buy:
-                                                close_req = {
-                                                    "action": mt5_lib.TRADE_ACTION_DEAL,
-                                                    "symbol": pos_sym,
-                                                    "volume": pos.volume,
-                                                    "type": mt5_lib.ORDER_TYPE_SELL if trade_is_buy else mt5_lib.ORDER_TYPE_BUY,
-                                                    "position": pos.ticket,
-                                                    "magic": 999,
-                                                    "comment": "ZP flip exit",
-                                                    "type_filling": mt5_lib.ORDER_FILLING_IOC,
-                                                }
-                                                result = mt5_lib.order_send(close_req)
-                                                pnl = pos.profit
-                                                was = "BUY" if trade_is_buy else "SELL"
-                                                now_dir = "BUY" if zp_is_buy else "SELL"
-                                                color = "#4A8C5D" if pnl >= 0 else "#C44444"
-                                                self._log(
-                                                    f"  <span style='color:{color}'>{pos_norm}: H1 ZP confirmed {was}->{now_dir} "
-                                                    f"| Closed P/L=${pnl:+.2f}</span>"
-                                                )
-                                                if result and result.retcode == mt5_lib.TRADE_RETCODE_DONE:
-                                                    open_symbols.discard(pos_norm)
-                                except Exception:
-                                    pass
+                                open_symbols.add(pos.symbol.upper().replace(".", "").replace("#", ""))
 
                         signals = []
 
@@ -1082,136 +1073,34 @@ class TradingApp(QMainWindow):
 
                             mt5_lib.symbol_select(sym_resolved, True)
 
-                            # H1 = primary signal, M15 = confirmation
+                            rates_h4 = mt5_lib.copy_rates_from_pos(sym_resolved, mt5_lib.TIMEFRAME_H4, 0, 200)
                             rates_h1 = mt5_lib.copy_rates_from_pos(sym_resolved, mt5_lib.TIMEFRAME_H1, 0, 200)
-                            rates_m15 = mt5_lib.copy_rates_from_pos(sym_resolved, mt5_lib.TIMEFRAME_M15, 0, 200)
 
+                            df_h4 = None
+                            if rates_h4 is not None and len(rates_h4) >= 20:
+                                df_h4 = pd.DataFrame(rates_h4)
+                                df_h4["time"] = pd.to_datetime(df_h4["time"], unit="s")
                             df_h1 = None
                             if rates_h1 is not None and len(rates_h1) >= 20:
                                 df_h1 = pd.DataFrame(rates_h1)
                                 df_h1["time"] = pd.to_datetime(df_h1["time"], unit="s")
-                            df_m15 = None
-                            if rates_m15 is not None and len(rates_m15) >= 20:
-                                df_m15 = pd.DataFrame(rates_m15)
-                                df_m15["time"] = pd.to_datetime(df_m15["time"], unit="s")
-                            if df_h1 is None:
+                            if df_h4 is None:
                                 continue
 
-                            # Compute ZP on H1
-                            zp = compute_zeropoint_state(df_h1)
-                            if zp is None or len(zp) < 2:
+                            # Use generate_signal() — actual profitable logic
+                            # Accepts ANY active ZP position with age penalty on confidence
+                            sig = zp_engine.generate_signal(sym_resolved, df_h4, df_h1)
+                            if sig is None:
                                 continue
 
-                            last = zp.iloc[-1]
-                            pos_val = int(last.get("pos", 0))
-                            if pos_val == 0:
+                            # Apply confidence filter
+                            if sig.confidence < min_conf:
                                 continue
 
-                            direction = "BUY" if pos_val == 1 else "SELL"
-                            entry = float(last["close"])
-                            atr_val = float(last["atr"])
-                            if atr_val <= 0 or np.isnan(atr_val):
-                                continue
-
-                            trailing_stop = float(last.get("xATRTrailingStop", 0))
-                            if trailing_stop <= 0:
-                                continue
-
-                            # Check freshness — fresh flip or recent (within 3 bars)
-                            bars_since = int(last.get("bars_since_flip", 999))
-                            is_fresh = bars_since <= 3
-
-                            # Smart Structure SL from Pine Script (pre-computed)
-                            # Use smart_sl from signal bar if available, else fallback
-                            sl = None
-                            if "smart_sl" in zp.columns:
-                                # Find most recent signal bar's smart_sl
-                                for sl_idx in range(len(zp) - 1, -1, -1):
-                                    sl_val = zp.iloc[sl_idx].get("smart_sl", float('nan'))
-                                    if not np.isnan(sl_val) and sl_val > 0:
-                                        sl = float(sl_val)
-                                        break
-
-                            if sl is None:
-                                # Fallback: trailing stop with buffer
-                                sl = trailing_stop
-                                buffer = atr_val * SL_BUFFER_PCT
-                                if direction == "BUY":
-                                    sl = sl - buffer
-                                else:
-                                    sl = sl + buffer
-
-                            # For non-fresh flips, tighten SL to trailing stop
-                            if not is_fresh and trailing_stop > 0:
-                                buffer = atr_val * SL_BUFFER_PCT
-                                if direction == "BUY":
-                                    ts_sl = trailing_stop - buffer
-                                    if ts_sl > sl:  # trailing stop is tighter
-                                        sl = ts_sl
-                                else:
-                                    ts_sl = trailing_stop + buffer
-                                    if ts_sl < sl:  # trailing stop is tighter
-                                        sl = ts_sl
-
-                            if direction == "BUY":
-                                tp1 = entry + atr_val * TP1_MULT
-                            else:
-                                tp1 = entry - atr_val * TP1_MULT
-
-                            # Skip if no room to profit
-                            if direction == "BUY" and entry >= tp1:
-                                continue
-                            if direction == "SELL" and entry <= tp1:
-                                continue
-
-                            sl_dist = abs(entry - sl)
-                            tp_dist = abs(tp1 - entry)
-                            rr = tp_dist / sl_dist if sl_dist > 0 else 0
-
-                            # M15 confirmation
-                            m15_conf = False
-                            if df_m15 is not None:
-                                zp_m15 = compute_zeropoint_state(df_m15)
-                                if zp_m15 is not None and len(zp_m15) > 0:
-                                    m15_pos = int(zp_m15.iloc[-1].get("pos", 0))
-                                    if direction == "BUY" and m15_pos == 1:
-                                        m15_conf = True
-                                    elif direction == "SELL" and m15_pos == -1:
-                                        m15_conf = True
-
-                            # Confidence scoring
-                            conf = 0.65
-                            if is_fresh:
-                                conf += 0.15
-                            if m15_conf:
-                                conf += 0.10
-                            if rr >= 2.0:
-                                conf += 0.05
-                            elif rr >= 1.5:
-                                conf += 0.03
-                            # Age penalty for non-fresh
-                            if not is_fresh:
-                                age_penalty = min(bars_since * 0.03, 0.20)
-                                conf -= age_penalty
-                            conf = max(0.40, min(conf, 0.98))
-                            tier = "S" if (is_fresh and m15_conf) else ("A" if m15_conf or is_fresh else "B")
-
-                            sig = ZeroPointSignal(
-                                symbol=sym_resolved, direction=direction,
-                                entry_price=entry, stop_loss=sl,
-                                tp1=tp1, tp2=tp1, tp3=tp1,
-                                atr_value=atr_val, confidence=conf,
-                                signal_time=datetime.now(), timeframe="H1",
-                                tier=tier, trailing_stop=trailing_stop,
-                                risk_reward=rr,
-                            )
-
-                            m15_tag = " [M15 ✓]" if m15_conf else ""
-                            fresh_tag = " FRESH" if is_fresh else f" age={bars_since}b"
                             self._log(
-                                f"  {symbol}: H1 {sig.direction} "
-                                f"R:R={rr:.2f} conf={conf:.0%} "
-                                f"tier={tier}{fresh_tag}{m15_tag}"
+                                f"  {symbol}: ZP {sig.direction} "
+                                f"R:R={sig.risk_reward:.2f} conf={sig.confidence:.0%} "
+                                f"tier={sig.tier}"
                             )
                             signals.append((sig, sym_resolved))
 
@@ -1223,12 +1112,12 @@ class TradingApp(QMainWindow):
                                 if lot > 0:
                                     self._zp_place_trade(sig, sym_resolved, lot)
                         else:
-                            self._log("Scan: no H1 signals found")
+                            self._log("Scan: no signals above confidence threshold")
 
                     except Exception as e:
                         self._log(f"Scan error: {e}")
 
-                    # Scan every 60s — H1 data updates frequently
+                    # Wait 60s between scans
                     for _ in range(60):
                         if not getattr(self, '_zp_running', False):
                             break
@@ -1281,7 +1170,7 @@ class TradingApp(QMainWindow):
             return fixed_lot
 
     def _zp_place_trade(self, sig, sym_resolved, lot):
-        """Place a trade with margin safety checks."""
+        """Place a trade exactly like zp_trade_now.py."""
         try:
             import MetaTrader5 as mt5_lib
 
@@ -1290,77 +1179,12 @@ class TradingApp(QMainWindow):
                 self._log(f"Cannot get info for {sym_resolved}")
                 return
 
-            # --- Margin safety: check free margin before placing ---
-            acct = mt5_lib.account_info()
-            if acct is None:
-                self._log(f"Skip {sym_resolved}: cannot read account info")
-                return
-
-            free_margin = acct.margin_free
-            equity = acct.equity
-            margin_used = acct.margin
-
-            # Don't trade if margin level would drop below 150%
-            # margin_level = equity / (margin_used + new_margin) * 100
-            # We want: equity / (margin_used + new_margin) >= 1.50
             if sig.direction == "BUY":
                 order_type = mt5_lib.ORDER_TYPE_BUY
                 price = sym_info.ask
             else:
                 order_type = mt5_lib.ORDER_TYPE_SELL
                 price = sym_info.bid
-
-            # Use order_check to see how much margin this trade needs
-            check_request = {
-                "action": mt5_lib.TRADE_ACTION_DEAL,
-                "symbol": sym_resolved,
-                "volume": lot,
-                "type": order_type,
-                "price": price,
-            }
-            check = mt5_lib.order_check(check_request)
-            if check is None:
-                self._log(f"Skip {sym_resolved}: order_check failed")
-                return
-
-            needed_margin = check.margin
-            if needed_margin <= 0:
-                self._log(f"Skip {sym_resolved}: margin check returned 0")
-                return
-
-            # Check if placing this trade keeps margin level above 150%
-            new_total_margin = margin_used + needed_margin
-            if new_total_margin > 0:
-                projected_level = (equity / new_total_margin) * 100
-            else:
-                projected_level = 9999
-
-            if projected_level < 150:
-                # Try reducing lot to fit within margin
-                vol_step = sym_info.volume_step
-                vol_min = sym_info.volume_min
-                # Max margin we can use: equity / 1.50 - margin_used
-                max_new_margin = (equity / 1.50) - margin_used
-                if max_new_margin <= 0:
-                    self._log(
-                        f"<span style='color:#D4A040'>Skip {sym_resolved}: margin level {projected_level:.0f}% "
-                        f"(need 150%+) | free=${free_margin:.0f}</span>"
-                    )
-                    return
-                # Scale lot proportionally
-                scale = max_new_margin / needed_margin
-                reduced_lot = lot * scale
-                reduced_lot = round(reduced_lot / vol_step) * vol_step
-                reduced_lot = max(vol_min, reduced_lot)
-                if reduced_lot < vol_min:
-                    self._log(
-                        f"<span style='color:#D4A040'>Skip {sym_resolved}: lot too small after margin fit</span>"
-                    )
-                    return
-                self._log(
-                    f"    {sym_resolved}: lot {lot:.2f} -> {reduced_lot:.2f} (margin safety)"
-                )
-                lot = reduced_lot
 
             digits = sym_info.digits
             sl = round(sig.stop_loss, digits)
@@ -1383,13 +1207,10 @@ class TradingApp(QMainWindow):
 
             result = mt5_lib.order_send(request)
             if result and result.retcode == mt5_lib.TRADE_RETCODE_DONE:
-                # Show updated margin after trade
-                acct2 = mt5_lib.account_info()
-                ml = f" ML={acct2.margin_level:.0f}%" if acct2 and acct2.margin_level else ""
                 self._log(
                     f"<span style='color:#4A8C5D'>TRADE: {sig.direction} {sym_resolved} "
-                    f"{lot:.2f}L @ {price:.5f} | SL={sl} TP={tp} | "
-                    f"R:R={sig.risk_reward:.2f} Tier={sig.tier}{ml}</span>"
+                    f"@ {price:.5f} | SL={sl} TP={tp} | "
+                    f"R:R={sig.risk_reward:.2f} Tier={sig.tier}</span>"
                 )
             else:
                 # Try other fill modes
@@ -1399,7 +1220,7 @@ class TradingApp(QMainWindow):
                     if result and result.retcode == mt5_lib.TRADE_RETCODE_DONE:
                         self._log(
                             f"<span style='color:#4A8C5D'>TRADE: {sig.direction} {sym_resolved} "
-                            f"{lot:.2f}L @ {price:.5f} | SL={sl} TP={tp}</span>"
+                            f"@ {price:.5f} | SL={sl} TP={tp}</span>"
                         )
                         return
                 rc = result.retcode if result else "?"

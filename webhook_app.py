@@ -1111,9 +1111,9 @@ class ACiApp(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("ACi")
+        self.setWindowTitle("ACi  —  V4 ZeroPoint Pro  |  97.5% WR")
         self.setMinimumSize(900, 700)
-        self.resize(1100, 800)
+        self.resize(1200, 850)
 
         self._dark_mode = True
         self._scanner = None
@@ -1231,23 +1231,26 @@ class ACiApp(QMainWindow):
 
         main_layout.addLayout(btn_row)
 
-        # --- Settings ---
-        settings_group = QGroupBox("Settings")
+        # --- Settings Row 1: Trading Settings ---
+        settings_group = QGroupBox("Trading Settings")
         settings_layout = QHBoxLayout(settings_group)
 
         settings_layout.addWidget(QLabel("Risk %:"))
         self.inp_risk = QLineEdit("30")
         self.inp_risk.setFixedWidth(40)
+        self.inp_risk.setToolTip("Risk per trade (30% = half-Kelly for 97.5% WR)")
         settings_layout.addWidget(self.inp_risk)
 
         settings_layout.addWidget(QLabel("Lots:"))
         self.inp_lots = QLineEdit("0.40")
         self.inp_lots.setFixedWidth(50)
+        self.inp_lots.setToolTip("Default lot size (overridden by risk-based sizing)")
         settings_layout.addWidget(self.inp_lots)
 
         settings_layout.addWidget(QLabel("Max:"))
         self.inp_max_trades = QLineEdit("5")
         self.inp_max_trades.setFixedWidth(30)
+        self.inp_max_trades.setToolTip("Max concurrent trades across all pairs")
         settings_layout.addWidget(self.inp_max_trades)
 
         settings_layout.addWidget(QLabel("Poll (sec):"))
@@ -1266,6 +1269,49 @@ class ACiApp(QMainWindow):
 
         settings_layout.addStretch()
         main_layout.addWidget(settings_group)
+
+        # --- V4 Profit Capture Info Panel ---
+        v4_group = QGroupBox("V4 Profit Capture  —  5-Layer Protection")
+        v4_layout = QHBoxLayout(v4_group)
+        v4_layout.setSpacing(20)
+
+        # Layer info labels
+        v4_items = [
+            (f"TP1: {TP1_MULT_AGG}x", f"TP2: {TP2_MULT_AGG}x", f"TP3: {TP3_MULT_AGG}x"),
+            (f"Early BE: {BE_TRIGGER_MULT}x ATR", f"Buffer: +{BE_BUFFER_MULT}x", ""),
+            (f"Micro-TP: {MICRO_TP_MULT}x ATR", f"Take: {int(MICRO_TP_PCT*100)}%", ""),
+            (f"Stall: {STALL_BARS} bars", f"Trail: {PROFIT_TRAIL_DISTANCE_MULT}x ATR", ""),
+        ]
+
+        layer_names = ["TPs (ATR mult)", "Breakeven", "Micro-Partial", "Stall + Trail"]
+        layer_colors = ["#4ADE80", "#FBBF24", "#38BDF8", "#A78BFA"]
+
+        for idx, (name, color) in enumerate(zip(layer_names, layer_colors)):
+            frame = QFrame()
+            frame.setStyleSheet(f"border: 1px solid {color}; border-radius: 6px; padding: 4px;")
+            fl = QVBoxLayout(frame)
+            fl.setContentsMargins(8, 4, 8, 4)
+            fl.setSpacing(1)
+
+            title = QLabel(name)
+            title.setStyleSheet(f"color: {color}; font-weight: bold; font-size: 11px; border: none;")
+            fl.addWidget(title)
+
+            for val in v4_items[idx]:
+                if val:
+                    lbl = QLabel(val)
+                    lbl.setStyleSheet("font-size: 10px; border: none; color: #B5AFA5;")
+                    fl.addWidget(lbl)
+
+            v4_layout.addWidget(frame)
+
+        # Active V4 state counter
+        self.lbl_v4_active = QLabel("Active: 0 trades managed")
+        self.lbl_v4_active.setStyleSheet("font-weight: bold; font-size: 12px; color: #4ADE80;")
+        v4_layout.addWidget(self.lbl_v4_active)
+
+        v4_layout.addStretch()
+        main_layout.addWidget(v4_group)
 
         # --- Pairs ---
         pairs_group = QGroupBox("Trading Pairs")
@@ -1451,8 +1497,12 @@ class ACiApp(QMainWindow):
         self._log(msg)
 
     def _on_signal(self, symbol, direction, entry, sl, tp1, tp2, tp3, atr):
-        self._log(f"*** SIGNAL: {direction} {symbol} @ {entry:.5f} "
-                  f"SL={sl:.5f} TP1={tp1:.5f} TP2={tp2:.5f} TP3={tp3:.5f} ***")
+        sl_dist = abs(entry - sl)
+        rr = abs(tp1 - entry) / sl_dist if sl_dist > 0 else 0
+        be_price = entry + (BE_TRIGGER_MULT * atr if direction == "BUY" else -BE_TRIGGER_MULT * atr)
+        self._log(f"*** V4 SIGNAL: {direction} {symbol} @ {entry:.5f} | "
+                  f"SL={sl:.5f} TP1={tp1:.5f} TP2={tp2:.5f} TP3={tp3:.5f} | "
+                  f"R:R={rr:.2f} BE@{be_price:.5f} ATR={atr:.5f} ***")
 
         # Register with V4 TP Manager if trading is enabled
         # Find the matching open position ticket (delay 3s for MT5 to register)
@@ -1460,7 +1510,7 @@ class ACiApp(QMainWindow):
             QTimer.singleShot(3000, lambda: self._register_trade_for_tp(
                 symbol, direction, entry, sl, tp1, tp2, tp3, atr))
 
-        # Draw SL/TP levels on chart
+        # Draw V4 levels on chart (Entry, SL, BE trigger, Micro-TP, TP1, TP2, TP3)
         if symbol in self.chart_objects:
             chart = self.chart_objects[symbol]
             try:
@@ -1471,12 +1521,24 @@ class ACiApp(QMainWindow):
                     except Exception:
                         pass
 
+                # Calculate V4 levels
+                sign = 1 if direction == "BUY" else -1
+                micro_level = entry + sign * MICRO_TP_MULT * atr
+                be_level = entry + sign * BE_TRIGGER_MULT * atr
+
                 lines = []
-                lines.append(chart.horizontal_line(entry, color="#FFFFFF", width=1, style="dashed", text=f"Entry {entry:.5f}"))
-                lines.append(chart.horizontal_line(sl, color="#F87171", width=2, style="solid", text=f"SL {sl:.5f}"))
-                lines.append(chart.horizontal_line(tp1, color="#4ADE80", width=1, style="dashed", text=f"TP1 {tp1:.5f}"))
-                lines.append(chart.horizontal_line(tp2, color="#4ADE80", width=1, style="dashed", text=f"TP2 {tp2:.5f}"))
-                lines.append(chart.horizontal_line(tp3, color="#4ADE80", width=1, style="dashed", text=f"TP3 {tp3:.5f}"))
+                lines.append(chart.horizontal_line(entry, color="#FFFFFF", width=1, style="dashed",
+                             text=f"ENTRY {entry:.5f}"))
+                lines.append(chart.horizontal_line(sl, color="#F87171", width=2, style="solid",
+                             text=f"SL {sl:.5f}"))
+                lines.append(chart.horizontal_line(be_level, color="#FBBF24", width=1, style="dashed",
+                             text=f"BE Trigger {be_level:.5f}"))
+                lines.append(chart.horizontal_line(tp1, color="#4ADE80", width=1, style="dashed",
+                             text=f"TP1 {tp1:.5f} ({TP1_MULT_AGG}x ATR)"))
+                lines.append(chart.horizontal_line(tp2, color="#38BDF8", width=1, style="dashed",
+                             text=f"TP2 {tp2:.5f} ({TP2_MULT_AGG}x ATR)"))
+                lines.append(chart.horizontal_line(tp3, color="#A78BFA", width=1, style="dashed",
+                             text=f"TP3 {tp3:.5f} ({TP3_MULT_AGG}x ATR)"))
                 self.chart_sl_lines[symbol] = lines
             except Exception as e:
                 self._log(f"[{symbol}] Level draw error: {e}")
@@ -1509,7 +1571,7 @@ class ACiApp(QMainWindow):
             return
 
         dlg = QDialog(self)
-        dlg.setWindowTitle("ACi — Positions & History")
+        dlg.setWindowTitle("ACi V4 — Positions & Trade Management")
         dlg.resize(900, 600)
         dlg.setStyleSheet(DARK_STYLE if self._dark_mode else CLAUDE_STYLE)
         layout = QVBoxLayout(dlg)
@@ -1526,10 +1588,11 @@ class ACiApp(QMainWindow):
         layout.addLayout(acct_row)
 
         # --- Open positions table ---
-        layout.addWidget(QLabel("Open Positions"))
-        self._dlg_tbl_open = QTableWidget(0, 9)
+        layout.addWidget(QLabel("Open Positions  —  V4 Profit Capture"))
+        self._dlg_tbl_open = QTableWidget(0, 11)
         self._dlg_tbl_open.setHorizontalHeaderLabels(
-            ["Symbol", "Dir", "Lots", "Entry", "Current", "P/L", "SL", "TP", "TP Status"])
+            ["Symbol", "Dir", "Lots", "Entry", "Current", "P/L", "SL", "TP",
+             "V4 Layers", "Trail SL", "Peak"])
         self._dlg_tbl_open.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self._dlg_tbl_open.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._dlg_tbl_open.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -1598,18 +1661,45 @@ class ACiApp(QMainWindow):
                 self._dlg_tbl_open.setItem(row, 6, QTableWidgetItem(f"{pos.sl:.5f}"))
                 self._dlg_tbl_open.setItem(row, 7, QTableWidgetItem(f"{pos.tp:.5f}"))
 
-                # TP status
+                # V4 Layers status
                 tp_state = self._tp_manager._tp_state.get(pos.ticket, {})
                 if tp_state:
-                    tp1_ok = "1" if tp_state.get("tp1") else "-"
-                    tp2_ok = "2" if tp_state.get("tp2") else "-"
-                    tp3_ok = "3" if tp_state.get("tp3") else "-"
-                    tp_text = f"[{tp1_ok}|{tp2_ok}|{tp3_ok}]"
+                    layers = []
+                    if tp_state.get("micro_tp"):
+                        layers.append("uTP")
+                    if tp_state.get("be_activated"):
+                        layers.append("BE")
+                    if tp_state.get("stall_be"):
+                        layers.append("STALL")
+                    if tp_state.get("tp1"):
+                        layers.append("TP1")
+                    if tp_state.get("tp2"):
+                        layers.append("TP2")
+                    if tp_state.get("tp3"):
+                        layers.append("TP3")
+                    if tp_state.get("profit_trail_sl") is not None:
+                        layers.append("TRAIL")
+                    layer_text = " ".join(layers) if layers else "---"
                 else:
-                    tp_text = "—"
-                tp_item = QTableWidgetItem(tp_text)
-                tp_item.setForeground(QColor("#4ADE80") if tp_state.get("tp1") else QColor("#B5AFA5"))
-                self._dlg_tbl_open.setItem(row, 8, tp_item)
+                    layer_text = "untracked"
+                layer_item = QTableWidgetItem(layer_text)
+                if "TP1" in layer_text:
+                    layer_item.setForeground(QColor("#4ADE80"))
+                elif "BE" in layer_text:
+                    layer_item.setForeground(QColor("#FBBF24"))
+                else:
+                    layer_item.setForeground(QColor("#B5AFA5"))
+                self._dlg_tbl_open.setItem(row, 8, layer_item)
+
+                # Trail SL
+                trail_sl = tp_state.get("profit_trail_sl") if tp_state else None
+                trail_text = f"{trail_sl:.5f}" if trail_sl is not None else "---"
+                self._dlg_tbl_open.setItem(row, 9, QTableWidgetItem(trail_text))
+
+                # Peak (max favorable price)
+                peak = tp_state.get("max_favorable") if tp_state else None
+                peak_text = f"{peak:.5f}" if peak is not None else "---"
+                self._dlg_tbl_open.setItem(row, 10, QTableWidgetItem(peak_text))
 
             # --- Trade history (today's deals) ---
             from datetime import datetime, timedelta
@@ -1786,6 +1876,25 @@ class ACiApp(QMainWindow):
                 sign = "+" if growth >= 0 else ""
                 self.lbl_growth.setText(f"Growth: {sign}{growth:.2f}%")
                 self.lbl_growth.setStyleSheet(f"font-weight: bold; font-size: 13px; color: {g_color};")
+
+            # Update V4 manager active trade count
+            managed = len(self._tp_manager._trade_info)
+            be_count = sum(1 for s in self._tp_manager._tp_state.values() if s.get("be_activated"))
+            tp1_count = sum(1 for s in self._tp_manager._tp_state.values() if s.get("tp1"))
+            trail_count = sum(1 for s in self._tp_manager._tp_state.values() if s.get("profit_trail_sl") is not None)
+            if managed > 0:
+                parts = [f"{managed} managed"]
+                if be_count:
+                    parts.append(f"{be_count} BE")
+                if tp1_count:
+                    parts.append(f"{tp1_count} TP1")
+                if trail_count:
+                    parts.append(f"{trail_count} trailing")
+                self.lbl_v4_active.setText("V4: " + " | ".join(parts))
+                self.lbl_v4_active.setStyleSheet("font-weight: bold; font-size: 12px; color: #4ADE80;")
+            else:
+                self.lbl_v4_active.setText("V4: Waiting for trades...")
+                self.lbl_v4_active.setStyleSheet("font-weight: bold; font-size: 12px; color: #6B6355;")
 
         except Exception:
             pass

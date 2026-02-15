@@ -344,8 +344,8 @@ class ScanEngine(QObject):
         if resolved is None:
             return
 
-        # Fetch OHLCV — 1000 bars for full historical view
-        rates = mt5.copy_rates_from_pos(resolved, self._tf_mt5, 0, 1000)
+        # Fetch OHLCV — 5000 bars for full historical view (~3 years on H4)
+        rates = mt5.copy_rates_from_pos(resolved, self._tf_mt5, 0, 5000)
         if rates is None or len(rates) < 20:
             return
 

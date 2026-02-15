@@ -5,6 +5,9 @@ on:
     tags:
       - 'v*'
 
+permissions:
+  contents: write
+
 jobs:
   build-windows:
     runs-on: windows-latest
@@ -37,7 +40,6 @@ jobs:
         with:
           name: Velocity 4 ${{ github.ref_name }}
           files: dist/Velocity4-${{ github.ref_name }}-win64.zip
-          generate_release_notes: true
           body: |
             ## Velocity 4 — Smart Money Trading System
 

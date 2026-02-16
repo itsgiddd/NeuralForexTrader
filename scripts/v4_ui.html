@@ -768,6 +768,7 @@
         charts: {}, chartSeries: {}, chartMarkers: {}, chartPriceLines: {}, chartInitialized: {},
         logCollapsed: false, logLines: [], settings: {},
         tradingEnabled: false, scannerRunning: false,
+        signalCache: {},  // per-symbol signal levels cache
     };
 
     // ── QWebChannel Bridge Init ──
@@ -919,7 +920,12 @@
             }
         }, 50);
         if (state.bridge) state.bridge.selectPair(symbol);
-        clearSignalPanel();
+        // Restore cached signal for this pair, or clear if none
+        if (state.signalCache[symbol]) {
+            _renderSignalPanel(state.signalCache[symbol]);
+        } else {
+            clearSignalPanel();
+        }
     }
 
     function updateTFButtons() {
@@ -1658,7 +1664,15 @@
 
     function updateSignalLevels(symbol, levels) {
         const d = typeof levels === 'string' ? JSON.parse(levels) : levels;
-        if (symbol !== state.currentPair) return;
+        // Cache signal for this symbol so it persists when switching pairs
+        state.signalCache[symbol] = d;
+        // Draw on chart (price lines) regardless of current view
+        _drawSignalPriceLines(symbol, d);
+        // Update side panel only if this pair is currently selected
+        if (symbol === state.currentPair) _renderSignalPanel(d);
+    }
+
+    function _renderSignalPanel(d) {
         const dig = (v) => Number(v).toFixed(5);
         document.getElementById('lvlEntry').textContent = dig(d.entry);
         document.getElementById('lvlSL').textContent = dig(d.sl);
@@ -1675,7 +1689,9 @@
             dirEl.className = 'text-center py-2 rounded-xl bg-red/10 border border-red/30 text-red text-[12px] font-bold';
             dirEl.innerHTML = '<i class="ph-bold ph-arrow-down-right mr-1"></i>SELL Signal';
         }
+    }
 
+    function _drawSignalPriceLines(symbol, d) {
         const series = state.chartSeries[symbol]; const chart = state.charts[symbol];
         if (!series || !chart) return;
         (state.chartPriceLines[symbol] || []).forEach(l => { try { series.candle.removePriceLine(l); } catch(e) {} });
